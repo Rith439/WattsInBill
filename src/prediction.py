@@ -1,5 +1,5 @@
 # src/prediction.py
-
+#Base line prediction
 import pandas as pd
 import numpy as np
 from xgboost import XGBRegressor
