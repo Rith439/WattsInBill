@@ -1,0 +1,13 @@
+appliance,power_kw
+ac,1.5
+refrigerator,0.15
+washing_machine,0.5
+geyser,2
+microwave,1.2
+television,0.1
+induction_stove,1.8
+water_purifier,0.025
+laptop,0.065
+fan,0.07
+lightbulb_led,0.012
+iron_box,1.2
