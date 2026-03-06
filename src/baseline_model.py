@@ -1,5 +1,4 @@
 # src/baseline_model.py
-<<<<<<< HEAD
 # 3-month moving average baseline prediction with MAE evaluation
 
 import pandas as pd
@@ -14,45 +13,19 @@ def baseline_monthly_energy() -> float:
     Baseline model:
     Predicts next month's energy consumption
     using average of last 3 months (moving average).
-=======
-#3 month moving average baseline precdiction
-import pandas as pd
-
-
-def baseline_monthly_energy():
-    """
-    Baseline model:
-    Predict next month's energy consumption
-    using average of last 3 months.
->>>>>>> fc00c93c2c23148d5fe5c1cef7ffb80187a05308
 
     Returns:
         float: predicted energy consumption in kWh
     """
-<<<<<<< HEAD
     df = load_data()
 
     # Take last 3 months
     last_3 = df["energy_kwh"].iloc[-3:]
-=======
-
-    df = pd.read_csv("data/processed/uci_monthly.csv")
-
-    # Sort by month
-    df["month"] = pd.to_datetime(df["month"])
-    df = df.sort_values("month").reset_index(drop=True)
-
-    # Take last 3 months energy values
-    last_3 = df["energy_kwh"].iloc[-3:]
-
-    # Compute average
->>>>>>> fc00c93c2c23148d5fe5c1cef7ffb80187a05308
     baseline_prediction = last_3.mean()
 
     return float(baseline_prediction)
 
 
-<<<<<<< HEAD
 def evaluate_baseline() -> dict:
     """
     Evaluates the 3-month moving average baseline
@@ -107,8 +80,3 @@ if __name__ == "__main__":
     print(f"  RMSE                 : {metrics['RMSE']} kWh")
     print("=" * 45)
     print("  (ML model must beat these numbers to be useful)")
-=======
-if __name__ == "__main__":
-    prediction = baseline_monthly_energy()
-    print("Baseline (3-month avg) predicted kWh:", prediction)
->>>>>>> fc00c93c2c23148d5fe5c1cef7ffb80187a05308
