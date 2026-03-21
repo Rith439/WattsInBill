@@ -13,8 +13,24 @@ import plotly.graph_objects as go
 
 from simulator  import run_simulation
 from prediction import train_and_evaluate, explain_prediction
+from auth       import require_login, logout
+from database   import (
+    init_db,
+    save_simulation,
+    get_simulation_history,
+    delete_simulation,
+    get_simulation_stats,
+)
 
 st.set_page_config(page_title="WattsInBill", page_icon="⚡", layout="wide")
+
+# ── Database init + Auth gate ─────────────────────────────────
+init_db()        # creates DB, tables, seeds data (safe every startup)
+require_login()  # shows login page if not authenticated; st.stop() if not
+
+# ── Session state shortcuts ───────────────────────────────────
+uid   = st.session_state.get("user_id")
+uname = st.session_state.get("username", "")
 
 st.markdown(f"""
 <style>
@@ -399,6 +415,19 @@ with st.sidebar:
     </div>""", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
 
+    # ── User info + logout ────────────────────────────────
+    if uname:
+        label = "👤 Guest" if uname == "guest" else f"👤 {uname.title()}"
+        st.markdown(
+            f"<div style='text-align:center;font-size:0.78rem;"
+            f"color:var(--text-mid);margin-bottom:8px;font-family:Plus Jakarta Sans,sans-serif'>"
+            f"{label}</div>",
+            unsafe_allow_html=True
+        )
+        if st.button("🚪 Logout", use_container_width=True, key="logout_btn", type="secondary"):
+            logout()
+        st.markdown("<hr>", unsafe_allow_html=True)
+
     st.markdown("### 📅 Billing Month")
     days = st.slider("Days in this month", 28, 31, 30, key="days_slider")
     st.markdown("### 🔌 Add Appliances")
@@ -408,7 +437,7 @@ with st.sidebar:
         "Appliance", APPLIANCES,
         format_func=lambda x: f"{APPLIANCE_ICONS.get(x,'🔌')} {x.replace('_',' ').title()}")
     c1, c2 = st.columns(2)
-    with c1: hours    = st.number_input("Hrs/day", 0.5, 24.0, 4.0, 0.5)
+    with c1: hours    = st.number_input("Hrs/day", 0.1, 24.0, 4.0, 0.1)
     with c2: quantity = st.number_input("Qty", 1, 20, 1)
 
     st.markdown('<div class="add-appliance-btn">', unsafe_allow_html=True)
@@ -449,11 +478,12 @@ with st.sidebar:
     st.caption("WattsInBill v2.2")
 
 # ── Tabs ─────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔮 Prediction & Bill",
     f"🔌 Appliance Breakdown ({len(st.session_state.appliance_list)})" if st.session_state.appliance_list else "🔌 Appliance Breakdown",
     "📊 ML Model Comparison",
     "🧠 SHAP Explainability",
+    "📋 History",
 ])
 
 result = None
@@ -464,6 +494,14 @@ if run_btn:
         with st.spinner("Running simulation..."):
             result = run_simulation(st.session_state.appliance_list, days)
             st.session_state["last_result"] = result
+
+        # Auto-save to MySQL for logged-in users (not guests)
+        if uid:
+            try:
+                save_simulation(uid, result, days)
+                st.toast("✅ Simulation saved to history!", icon="💾")
+            except Exception as e:
+                st.toast(f"⚠️ Could not save simulation: {e}", icon="⚠️")
 
 # Persist last simulation result across reruns
 if "last_result" in st.session_state:
@@ -544,14 +582,14 @@ with tab1:
             if not slab_df.empty:
                 max_cost = slab_df["cost"].max()
                 def _slab_style(row):
-                    # Color-codes rows from green → red based on cost relative to max slab
                     cost_val = row["cost"] if "cost" in row.index else row.iloc[-1]
                     pct = (cost_val / max_cost) if max_cost else 0
-                    if pct < 0.25:   bg="rgba(57,255,20,0.12)";  color="#7dfa5a"
-                    elif pct < 0.50: bg="rgba(255,220,0,0.12)";  color="#ffe033"
-                    elif pct < 0.75: bg="rgba(255,140,0,0.12)";  color="#ffaa33"
-                    else:            bg="rgba(220,50,50,0.13)";   color="#ff6b6b"
-                    return [f"background-color:{bg};color:{color};border-bottom:1px solid rgba(255,255,255,0.06);border-right:1px solid rgba(255,255,255,0.06);" for _ in row]
+                    # Gold tone scale — bg gets richer, text stays readable
+                    if pct < 0.25:   bg="rgba(212,169,0,0.06)";  color="#8a7020"
+                    elif pct < 0.50: bg="rgba(212,169,0,0.13)";  color="#b08a00"
+                    elif pct < 0.75: bg="rgba(212,169,0,0.22)";  color="#c49800"
+                    else:            bg="rgba(212,169,0,0.32)";   color="#7a5c00"
+                    return [f"background-color:{bg};color:{color};font-weight:600;border-bottom:1px solid rgba(212,169,0,0.10);border-right:1px solid rgba(212,169,0,0.08);" for _ in row]
 
                 st.dataframe(
                     slab_df.rename(columns={"units":"Units (kWh)","rate":"Rate (₹/kWh)","cost":"Cost (₹)"})
@@ -603,14 +641,13 @@ with tab2:
                 kwh_max = df_renamed["Monthly kWh"].max()
 
                 def _app_row_style(row):
-                    # Highlights the Monthly kWh column with gold intensity proportional to consumption
                     styles = []
                     for col in row.index:
                         base = "border-bottom:1px solid rgba(255,255,255,0.05);border-right:1px solid rgba(255,255,255,0.04);"
                         if col == "Monthly kWh":
                             pct   = row[col] / kwh_max if kwh_max else 0
-                            alpha = round(0.05 + pct * 0.20, 2)
-                            styles.append(f"background-color:rgba(212,169,0,{alpha});color:#e8edf5;{base}")
+                            alpha = round(0.08 + pct * 0.30, 2)
+                            styles.append(f"background-color:rgba(212,169,0,{alpha});color:#3a2500;font-weight:700;{base}")
                         else:
                             styles.append(f"background-color:#0f1218;color:#c8cdd8;{base}")
                     return styles
@@ -844,3 +881,109 @@ with tab4:
         st.info(f"📌 Model starts from **{shap_result['base_value']} kWh** "
                 f"and adjusts to reach **{shap_result['predicted_kwh']} kWh** "
                 f"via {len(values)} feature contributions.")
+
+# ── Tab 5 — Simulation History ────────────────────────────────
+with tab5:
+    st.markdown("## 📋 Simulation History")
+
+    if not uid:
+        st.info("🔒 Sign in with an account (not guest) to save and view your simulation history.")
+    else:
+        stats   = get_simulation_stats(uid)
+        history = get_simulation_history(uid, limit=20)
+
+        if not history:
+            st.caption("No simulations saved yet — run one from the sidebar!")
+        else:
+            # ── Stats row ──────────────────────────────────
+            st.markdown("<br>", unsafe_allow_html=True)
+            s1, s2, s3, s4 = st.columns(4)
+            s1.markdown(f"""
+            <div class="metric-card gold-card">
+                <div class="label">Total Runs</div>
+                <div class="value">{stats['total_runs']}</div>
+            </div>""", unsafe_allow_html=True)
+            s2.markdown(f"""
+            <div class="metric-card blue-card">
+                <div class="label">Avg Bill</div>
+                <div class="value">₹{stats['avg_bill']:.0f}</div>
+            </div>""", unsafe_allow_html=True)
+            s3.markdown(f"""
+            <div class="metric-card blue-card">
+                <div class="label">Lowest Bill</div>
+                <div class="value">₹{stats['min_bill']:.0f}</div>
+            </div>""", unsafe_allow_html=True)
+            s4.markdown(f"""
+            <div class="metric-card blue-card">
+                <div class="label">Highest Bill</div>
+                <div class="value">₹{stats['max_bill']:.0f}</div>
+            </div>""", unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("<hr>", unsafe_allow_html=True)
+
+            # ── Bill trend chart ───────────────────────────
+            if len(history) > 1:
+                st.markdown("### 📈 Bill Trend")
+                run_dates  = [str(r["run_at"])[:16] for r in reversed(history)]
+                run_bills  = [r["total_bill"]        for r in reversed(history)]
+                run_kwh    = [r["final_kwh"]          for r in reversed(history)]
+
+                hist_fig = go.Figure()
+                hist_fig.add_trace(go.Scatter(
+                    x=run_dates, y=run_bills,
+                    mode="lines+markers", name="Total Bill (₹)",
+                    line=dict(color=GOLD, width=2.5),
+                    marker=dict(color=GOLD, size=7),
+                    hovertemplate="<b>%{x}</b><br>₹%{y:.2f}<extra></extra>"
+                ))
+                hist_fig.add_trace(go.Scatter(
+                    x=run_dates, y=run_kwh,
+                    mode="lines+markers", name="Final kWh",
+                    line=dict(color=STEEL, width=2, dash="dot"),
+                    marker=dict(color=STEEL, size=6),
+                    hovertemplate="<b>%{x}</b><br>%{y:.2f} kWh<extra></extra>",
+                    yaxis="y2"
+                ))
+                hist_fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(11,13,17,0.45)",
+                    font=dict(color=TEXT_MID, family="Plus Jakarta Sans"),
+                    xaxis=dict(gridcolor=GRID_C, tickfont=dict(color=TEXT_DIM), tickangle=-30),
+                    yaxis=dict(gridcolor=GRID_C, title=dict(text="Bill (₹)", font=dict(color=GOLD, size=11)), tickfont=dict(color=TEXT_DIM)),
+                    yaxis2=dict(overlaying="y", side="right", title=dict(text="kWh", font=dict(color=STEEL, size=11)), tickfont=dict(color=TEXT_DIM), gridcolor="rgba(0,0,0,0)"),
+                    legend=dict(bgcolor="rgba(18,21,28,0.8)", bordercolor=GRID_C, font=dict(color=TEXT_LT)),
+                    margin=dict(t=40, b=60, l=60, r=60), height=380, hovermode="x unified"
+                )
+                st.plotly_chart(hist_fig, use_container_width=True)
+                st.markdown("<hr>", unsafe_allow_html=True)
+
+            # ── Per-run expandable cards ───────────────────
+            st.markdown("### Run Log")
+            for run in history:
+                run_at    = str(run["run_at"])[:16]
+                num_apps  = len(run["appliances"])
+                flag_icon = {"high_usage": "🔴", "low_usage": "🟢", "normal": "⚪"}.get(run["usage_flag"], "⚪")
+
+                with st.expander(
+                    f"{flag_icon}  {run_at}  ·  ₹{run['total_bill']}  ·  "
+                    f"{run['final_kwh']} kWh  ·  {num_apps} appliance{'s' if num_apps != 1 else ''}"
+                ):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Final kWh",        run["final_kwh"])
+                    c2.metric("Total Bill",        f"₹{run['total_bill']}")
+                    c3.metric("ML Predicted",      f"{run['ml_predicted_kwh']} kWh")
+                    c4.metric("Usage",             run["usage_flag"].replace("_", " ").title())
+
+                    if run["appliances"]:
+                        st.markdown("**Appliances used in this run:**")
+                        df_run = pd.DataFrame(run["appliances"])[
+                            ["appliance", "hours_day", "quantity", "monthly_kwh"]
+                        ]
+                        df_run.columns = ["Appliance", "Hrs/Day", "Qty", "kWh/Month"]
+                        st.dataframe(df_run, use_container_width=True, hide_index=True)
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("🗑 Delete this run", key=f"del_sim_{run['id']}", type="secondary"):
+                        if delete_simulation(run["id"], uid):
+                            st.toast("Run deleted.", icon="🗑")
+                            st.rerun()
