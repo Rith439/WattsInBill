@@ -15,14 +15,14 @@ from billing             import calculate_bill
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
 
-# Average monthly consumption computed directly from UCI dataset
-# Auto-updates if the dataset changes — no hardcoding
 DATASET_AVG = pd.read_csv("data/processed/uci_monthly.csv")["energy_kwh"].mean()
 
-# Clamp bounds for adjustment factor
-# Prevents unrealistic predictions if appliance input is extreme
-MIN_FACTOR = 0.5   # final can't go below 50% of ML prediction
-MAX_FACTOR = 2.0   # final can't go above 200% of ML prediction
+# Blend weight — how much the ML prediction influences the final result.
+# When appliance input is very small vs DATASET_AVG, the appliance
+# estimate should dominate (weight → 0). When appliance input is close
+# to or exceeds DATASET_AVG the ML model is more relevant (weight → 0.4).
+MAX_ML_WEIGHT = 0.4   # ML contributes at most 40% of the final value
+MAX_FACTOR    = 2.0   # final can't exceed 200% of ML prediction
 
 
 # ─────────────────────────────────────────────────────────────
@@ -30,14 +30,18 @@ MAX_FACTOR = 2.0   # final can't go above 200% of ML prediction
 # ─────────────────────────────────────────────────────────────
 def compute_adjusted_prediction(ml_kwh: float, appliance_kwh: float) -> dict:
     """
-    Scales the ML prediction using the appliance estimate.
+    Blends the appliance estimate with the ML prediction.
 
     Formula:
-        AdjustmentFactor = appliance_kwh / DATASET_AVG
-        FinalEnergy      = ml_kwh × AdjustmentFactor
+        ml_weight     = min(appliance_kwh / DATASET_AVG, 1.0) * MAX_ML_WEIGHT
+        appliance_weight = 1 - ml_weight
+        final_kwh     = appliance_weight * appliance_kwh
+                      + ml_weight       * ml_kwh
 
-    The factor is clamped between 0.5 and 2.0 to prevent
-    unrealistic outputs from extreme appliance inputs.
+    This ensures:
+      - Small appliance input  → result stays close to appliance estimate
+      - Full household input   → ML model contributes up to 40%
+      - No hard floor that inflates bills for minimal usage
 
     Args:
         ml_kwh        : ML predicted consumption (kWh)
@@ -46,12 +50,22 @@ def compute_adjusted_prediction(ml_kwh: float, appliance_kwh: float) -> dict:
     Returns:
         dict with factor, final_kwh, and deviation flag
     """
-    factor  = appliance_kwh / DATASET_AVG
-    factor  = max(MIN_FACTOR, min(factor, MAX_FACTOR))  # clamp
+    # How "complete" is the appliance list relative to a typical household?
+    completeness  = min(appliance_kwh / DATASET_AVG, 1.0)
 
-    final_kwh = ml_kwh * factor
+    # ML weight scales from 0 (just 1 appliance) → MAX_ML_WEIGHT (full house)
+    ml_weight         = completeness * MAX_ML_WEIGHT
+    appliance_weight  = 1.0 - ml_weight
 
-    # Deviation flag — how far appliance estimate is from dataset avg
+    final_kwh = appliance_weight * appliance_kwh + ml_weight * ml_kwh
+
+    # Safety cap — never exceed 200% of ML prediction
+    final_kwh = min(final_kwh, ml_kwh * MAX_FACTOR)
+
+    # Adjustment factor for display purposes
+    factor = final_kwh / ml_kwh if ml_kwh > 0 else 1.0
+
+    # Deviation flag
     deviation_pct = ((appliance_kwh - DATASET_AVG) / DATASET_AVG) * 100
 
     if deviation_pct > 30:
@@ -79,18 +93,8 @@ def run_simulation(appliance_inputs: list, days: int = 30) -> dict:
     Pipeline:
         1. ML prediction        → predict_monthly_energy()
         2. Appliance estimate   → estimate_appliance_energy()
-        3. Hybrid adjustment    → compute_adjusted_prediction()
+        3. Hybrid blend         → compute_adjusted_prediction()
         4. Bill calculation     → calculate_bill()
-
-    Args:
-        appliance_inputs : list of dicts, each with:
-                             - "name"     : appliance name (str)
-                             - "hours"    : hours used per day (float)
-                             - "quantity" : number of units (int)
-        days             : number of days in billing month (default 30)
-
-    Returns:
-        dict with full simulation results for app.py to display
     """
 
     # ── Step 1: ML Prediction ──────────────────────────────
@@ -100,7 +104,7 @@ def run_simulation(appliance_inputs: list, days: int = 30) -> dict:
     appliance_result = estimate_appliance_energy(appliance_inputs, days)
     appliance_kwh    = appliance_result["total_kwh"]
 
-    # ── Step 3: Hybrid Adjustment ─────────────────────────
+    # ── Step 3: Hybrid Blend ───────────────────────────────
     adjustment = compute_adjusted_prediction(ml_kwh, appliance_kwh)
     final_kwh  = adjustment["final_kwh"]
 
@@ -108,23 +112,14 @@ def run_simulation(appliance_inputs: list, days: int = 30) -> dict:
     bill = calculate_bill(final_kwh)
 
     return {
-        # ML layer
         "ml_predicted_kwh"   : round(ml_kwh, 2),
-
-        # Appliance layer
         "appliance_kwh"      : appliance_kwh,
         "appliance_breakdown": appliance_result["breakdown"],
         "skipped_appliances" : appliance_result["skipped"],
-
-        # Adjustment layer
         "adjustment_factor"  : adjustment["adjustment_factor"],
         "deviation_pct"      : adjustment["deviation_pct"],
         "usage_flag"         : adjustment["usage_flag"],
-
-        # Final prediction
         "final_kwh"          : final_kwh,
-
-        # Billing layer
         "energy_charge"      : bill["energy_charge"],
         "fixed_charge"       : bill["fixed_charge"],
         "meter_rent"         : bill["meter_rent"],
@@ -138,7 +133,13 @@ def run_simulation(appliance_inputs: list, days: int = 30) -> dict:
 # MAIN — quick test
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    sample_appliances = [
+    # Test 1: just 1 AC for 1 hour — should give a small bill
+    single = [{"name": "ac", "hours": 1, "quantity": 1}]
+    r = run_simulation(single, days=30)
+    print(f"1hr AC/day → {r['appliance_kwh']} kWh appliance | {r['final_kwh']} kWh final | ₹{r['total_bill']}")
+
+    # Test 2: full household
+    full = [
         {"name": "ac",              "hours": 8,  "quantity": 1},
         {"name": "fan",             "hours": 10, "quantity": 4},
         {"name": "refrigerator",    "hours": 24, "quantity": 1},
@@ -147,26 +148,5 @@ if __name__ == "__main__":
         {"name": "washing_machine", "hours": 1,  "quantity": 1},
         {"name": "laptop",          "hours": 8,  "quantity": 1},
     ]
-
-    result = run_simulation(sample_appliances, days=30)
-
-    print("\n" + "="*50)
-    print("  SmartBill AI — Simulation Results")
-    print("="*50)
-    print(f"  ML Predicted       : {result['ml_predicted_kwh']} kWh")
-    print(f"  Appliance Estimate : {result['appliance_kwh']} kWh")
-    print(f"  Adjustment Factor  : {result['adjustment_factor']}")
-    print(f"  Deviation          : {result['deviation_pct']}%")
-    print(f"  Usage Flag         : {result['usage_flag']}")
-    print(f"  Final Prediction   : {result['final_kwh']} kWh")
-    print(f"\n  {'─'*40}")
-    print(f"  Energy Charge      : ₹{result['energy_charge']}")
-    print(f"  Fixed Charge       : ₹{result['fixed_charge']}")
-    print(f"  Meter Rent         : ₹{result['meter_rent']}")
-    print(f"  {'─'*40}")
-    print(f"  Total Bill         : ₹{result['total_bill']}")
-    print(f"\n  Alert              : {result['slab_alert']}")
-    print("="*50)
-
-    if result["skipped_appliances"]:
-        print(f"\n  ⚠️  Skipped: {result['skipped_appliances']}")
+    r2 = run_simulation(full, days=30)
+    print(f"Full house → {r2['appliance_kwh']} kWh appliance | {r2['final_kwh']} kWh final | ₹{r2['total_bill']}")
