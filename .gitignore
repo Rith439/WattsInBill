@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 models/
 data/raw/
+.env
+
+.streamlit/
+
+.DS_Store
+Thumbs.db

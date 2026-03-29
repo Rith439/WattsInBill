@@ -22,11 +22,26 @@ from database   import (
     get_simulation_stats,
 )
 
+st.markdown("""
+<style>
+/* Hide Streamlit top menu and header */
+#MainMenu {visibility: hidden;}
+header {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* Optional: remove extra padding from top */
+[data-testid="stAppViewContainer"] {
+    margin-top: -50px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.set_page_config(page_title="WattsInBill", page_icon="⚡", layout="wide")
 
 # ── Database init + Auth gate ─────────────────────────────────
 init_db()        # creates DB, tables, seeds data (safe every startup)
 require_login()  # shows login page if not authenticated; st.stop() if not
+
 
 # ── Session state shortcuts ───────────────────────────────────
 uid   = st.session_state.get("user_id")
